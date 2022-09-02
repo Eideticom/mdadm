@@ -26,6 +26,12 @@
 #include	"md_u.h"
 #include	"md_p.h"
 #include	<ctype.h>
+#include	<sys/ioctl.h>
+
+#ifndef BLKDISCARD
+#define BLKDISCARD _IO(0x12,119)
+#endif
+#include	<fcntl.h>
 
 static int round_size_and_verify(unsigned long long *size, int chunk)
 {
@@ -89,6 +95,63 @@ int default_layout(struct supertype *st, int level, int verbose)
 		pr_err("layout defaults to %s\n", layout_name);
 
 	return layout;
+}
+
+static int discard_device(const char *devname, unsigned long long size)
+{
+	uint64_t range[2] = {0, size};
+	unsigned long buf[4096 / sizeof(unsigned long)];
+	unsigned long i;
+	int fd;
+
+	fd = open(devname, O_RDWR | O_EXCL);
+	if (fd < 0) {
+		pr_err("could not open device for discard: %s\n", devname);
+		return 1;
+	}
+
+	if (ioctl(fd, BLKDISCARD, &range)) {
+		pr_err("discard failed on '%s': %m\n", devname);
+		goto out_err;
+	}
+
+	if (read(fd, buf, sizeof(buf)) != sizeof(buf)) {
+		pr_err("failed to readback '%s' after discard: %m\n", devname);
+		goto out_err;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(buf); i++) {
+		if (buf[i]) {
+			pr_err("device did not read back zeros after discard on '%s': %lx\n",
+			       devname, buf[i]);
+			goto out_err;
+		}
+	}
+
+	close(fd);
+	return 0;
+
+out_err:
+	close(fd);
+	return 1;
+}
+
+static int discard_devices(struct context *c, struct mddev_dev *devlist,
+			   unsigned long long size)
+{
+	struct mddev_dev *dv;
+
+	for (dv = devlist; dv; dv = dv->next) {
+		if (!strcmp(dv->devname, "missing"))
+			continue;
+
+		if (c->verbose)
+			pr_err("discarding all data on: %s\n", dv->devname);
+		if (discard_device(dv->devname, size))
+			return 1;
+	}
+
+	return 0;
 }
 
 int Create(struct supertype *st, char *mddev,
@@ -601,6 +664,18 @@ int Create(struct supertype *st, char *mddev,
 			if (c->verbose > 0)
 				pr_err("creation continuing despite oddities due to --run\n");
 		}
+	}
+
+	if (s->discard) {
+		if (discard_devices(c, devlist, (s->size << 10) +
+				    (st->data_offset << 9)))
+			return 1;
+
+		/* All disks are zero so if there are none missing assume
+		 * the array is clean
+		 */
+		if (first_missing >= s->raiddisks)
+			s->assume_clean = 1;
 	}
 
 	/* If this is raid4/5, we want to configure the last active slot
