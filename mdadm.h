@@ -433,6 +433,7 @@ extern char Version[], Usage[], Help[], OptionHelp[],
  */
 enum special_options {
 	AssumeClean = 300,
+	Discard,
 	BitmapChunk,
 	WriteBehind,
 	ReAdd,
@@ -593,6 +594,7 @@ struct shape {
 	int	bitmap_chunk;
 	char	*bitmap_file;
 	int	assume_clean;
+	bool	discard;
 	int	write_behind;
 	unsigned long long size;
 	unsigned long long data_offset;

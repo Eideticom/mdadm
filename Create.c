@@ -26,6 +26,12 @@
 #include	"md_u.h"
 #include	"md_p.h"
 #include	<ctype.h>
+#include	<sys/ioctl.h>
+
+#ifndef BLKDISCARD
+#define BLKDISCARD _IO(0x12,119)
+#endif
+#include	<fcntl.h>
 
 static int round_size_and_verify(unsigned long long *size, int chunk)
 {
@@ -89,6 +95,38 @@ int default_layout(struct supertype *st, int level, int verbose)
 		pr_err("layout defaults to %s\n", layout_name);
 
 	return layout;
+}
+
+static int discard_device(struct context *c, int fd, const char *devname,
+			  unsigned long long offset, unsigned long long size)
+{
+	uint64_t range[2] = {offset, size};
+	unsigned long buf[4096 / sizeof(unsigned long)];
+	unsigned long i;
+
+	if (c->verbose)
+		printf("discarding data from %lld to %lld on: %s\n",
+		       offset, size, devname);
+
+	if (ioctl(fd, BLKDISCARD, &range)) {
+		pr_err("discard failed on '%s': %m\n", devname);
+		return 1;
+	}
+
+	if (pread(fd, buf, sizeof(buf), offset) != sizeof(buf)) {
+		pr_err("failed to readback '%s' after discard: %m\n", devname);
+		return 1;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(buf); i++) {
+		if (buf[i]) {
+			pr_err("device did not read back zeros after discard on '%s': %lx\n",
+			       devname, buf[i]);
+			return 1;
+		}
+	}
+
+	return 0;
 }
 
 int Create(struct supertype *st, char *mddev,
@@ -607,7 +645,7 @@ int Create(struct supertype *st, char *mddev,
 	 * as missing, so that a reconstruct happens (faster than re-parity)
 	 * FIX: Can we do this for raid6 as well?
 	 */
-	if (st->ss->external == 0 && s->assume_clean == 0 &&
+	if (st->ss->external == 0 && s->assume_clean == 0 && s->discard == 0 &&
 	    c->force == 0 && first_missing >= s->raiddisks) {
 		switch (s->level) {
 		case 4:
@@ -624,8 +662,8 @@ int Create(struct supertype *st, char *mddev,
 	/* For raid6, if creating with 1 missing drive, make a good drive
 	 * into a spare, else the create will fail
 	 */
-	if (s->assume_clean == 0 && c->force == 0 && first_missing < s->raiddisks &&
-	    st->ss->external == 0 &&
+	if (s->assume_clean == 0 && s->discard == 0 && c->force == 0 &&
+	    first_missing < s->raiddisks && st->ss->external == 0 &&
 	    second_missing >= s->raiddisks && s->level == 6) {
 		insert_point = s->raiddisks - 1;
 		if (insert_point == first_missing)
@@ -686,7 +724,7 @@ int Create(struct supertype *st, char *mddev,
 	     (insert_point < s->raiddisks || first_missing < s->raiddisks)) ||
 	    (s->level == 6 && (insert_point < s->raiddisks ||
 			       second_missing < s->raiddisks)) ||
-	    (s->level <= 0) || s->assume_clean) {
+	    (s->level <= 0) || s->assume_clean || s->discard) {
 		info.array.state = 1; /* clean, but one+ drive will be missing*/
 		info.resync_start = MaxSector;
 	} else {
@@ -945,6 +983,15 @@ int Create(struct supertype *st, char *mddev,
 				}
 				if (fd >= 0)
 					remove_partitions(fd);
+
+				if (s->discard &&
+				    discard_device(c, fd, dv->devname,
+						   dv->data_offset << 9,
+						   s->size << 10)) {
+					ioctl(mdfd, STOP_ARRAY, NULL);
+					goto abort_locked;
+				}
+
 				if (st->ss->add_to_super(st, &inf->disk,
 							 fd, dv->devname,
 							 dv->data_offset)) {
