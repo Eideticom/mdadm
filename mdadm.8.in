@@ -837,6 +837,21 @@ array is resynced at creation.  From Linux version 3.0,
 can be used with that command to avoid the automatic resync.
 
 .TP
+.BR \-\-discard
+When creating an array, send block discard (aka trim or deallocate)
+requests to all the block devices. In most cases this should zero all
+the disks. If any discard fails, or if zeros are not read back from the
+disk, then the operation will be aborted.
+.IP
+If all discards succeed, and there are no missing disks specified,
+then the array should not need to be synchronized after it is created
+(as all disks are zero). The operation will thus proceed as if
+.B \-\-assume\-clean
+was specified.
+.IP
+This is only meaningful with --create.
+
+.TP
 .BR \-\-backup\-file=
 This is needed when
 .B \-\-grow
