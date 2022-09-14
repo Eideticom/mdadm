@@ -26,6 +26,8 @@
 #include	"md_u.h"
 #include	"md_p.h"
 #include	<ctype.h>
+#include	<fcntl.h>
+#include	<sys/wait.h>
 
 static int round_size_and_verify(unsigned long long *size, int chunk)
 {
@@ -91,6 +93,73 @@ int default_layout(struct supertype *st, int level, int verbose)
 	return layout;
 }
 
+static pid_t write_zeroes_fork(int fd, struct shape *s, struct supertype *st,
+			       struct mddev_dev *dv)
+
+{
+	unsigned long long offset_bytes, size_bytes;
+	int ret = 0;
+	pid_t pid;
+
+	size_bytes = KIB_TO_BYTES(s->size);
+
+	/*
+	 * If size_bytes is zero, this is a zoned raid array where
+	 * each disk is of a different size and uses its full
+	 * disk. Thus zero the entire disk.
+	 */
+	if (!size_bytes && !get_dev_size(fd, dv->devname, &size_bytes))
+		return -1;
+
+	if (dv->data_offset != INVALID_SECTORS)
+		offset_bytes = SEC_TO_BYTES(dv->data_offset);
+	else
+		offset_bytes = SEC_TO_BYTES(st->data_offset);
+
+	pr_info("zeroing data from %lld to %lld on: %s\n",
+		offset_bytes, size_bytes, dv->devname);
+
+	pid = fork();
+	if (pid < 0) {
+		pr_err("Could not fork to zero disks: %m\n");
+		return pid;
+	} else if (pid != 0) {
+		return pid;
+	}
+
+	if (fallocate(fd, FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE,
+		      offset_bytes, size_bytes)) {
+		pr_err("zeroing %s failed: %m\n", dv->devname);
+		ret = 1;
+	}
+
+	exit(ret);
+}
+
+static int wait_for_zero_forks(struct mdinfo *info, int count)
+{
+	int wstatus, ret = 0, i;
+	bool waited = false;
+
+	for (i = 0; i < count; i++) {
+		if (!info[i].zero_pid)
+			continue;
+
+		waited = true;
+		waitpid(info[i].zero_pid, &wstatus, 0);
+
+		if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus))
+			ret = 1;
+	}
+
+	if (ret)
+		pr_err("zeroing failed!\n");
+	else if (waited)
+		pr_info("zeroing finished\n");
+
+	return ret;
+}
+
 static int add_disk_to_super(int mdfd, struct shape *s, struct context *c,
 		struct supertype *st, struct mddev_dev *dv,
 		struct mdinfo *info, int have_container, int major_num)
@@ -147,6 +216,14 @@ static int add_disk_to_super(int mdfd, struct shape *s, struct context *c,
 		return 1;
 	}
 	st->ss->getinfo_super(st, info, NULL);
+
+	if (s->write_zeroes) {
+		info->zero_pid = write_zeroes_fork(fd, s, st, dv);
+		if (info->zero_pid <= 0) {
+			ioctl(mdfd, STOP_ARRAY, NULL);
+			return 1;
+		}
+	}
 
 	if (have_container && c->verbose > 0)
 		pr_err("Using %s for device %d\n",
@@ -287,6 +364,10 @@ static int add_disks(int mdfd, struct mdinfo *info, struct shape *s,
 		}
 
 		if (pass == 1) {
+			ret = wait_for_zero_forks(infos, total_slots);
+			if (ret)
+				goto out;
+
 			ret = update_metadata(mdfd, s, st, map, info,
 					      chosen_name);
 			if (ret)
@@ -295,6 +376,8 @@ static int add_disks(int mdfd, struct mdinfo *info, struct shape *s,
 	}
 
 out:
+	if (ret)
+		wait_for_zero_forks(infos, total_slots);
 	free(infos);
 	return ret;
 }
