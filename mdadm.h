@@ -273,6 +273,9 @@ static inline void __put_unaligned32(__u32 val, void *p)
 
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
 
+#define KIB_TO_BYTES(x)	((x) << 10)
+#define SEC_TO_BYTES(x)	((x) << 9)
+
 extern const char Name[];
 
 struct md_bb_entry {
@@ -433,6 +436,7 @@ extern char Version[], Usage[], Help[], OptionHelp[],
  */
 enum special_options {
 	AssumeClean = 300,
+	WriteZeroes,
 	BitmapChunk,
 	WriteBehind,
 	ReAdd,
@@ -593,6 +597,7 @@ struct shape {
 	int	bitmap_chunk;
 	char	*bitmap_file;
 	int	assume_clean;
+	bool	write_zeroes;
 	int	write_behind;
 	unsigned long long size;
 	unsigned long long data_offset;
